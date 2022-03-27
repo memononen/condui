@@ -45,7 +45,7 @@ void on_size_changed()
 typedef unsigned char uint8;
 typedef signed char int8;
 
-enum class Operand : uint8 { Copy = 0, And, Or, };
+enum class Operator : uint8 { Copy = 0, And, Or, };
 const char* opName[] = { "=", "AND", "OR", };
 const char* opNameShort[] = { " ", "&", "|", };
 
@@ -58,18 +58,30 @@ struct Cond
       strcpy(name, "Name");
     }
 
-    void set(int8 _indent, Operand _op, const char* _name)
+    bool eval() const { return val; }
+
+    void set(int8 _indent, Operator _op, const char* _name)
     {
       indent = _indent;
       op = _op;
       strcpy(name, _name);
     }
 
-    Operand op = Operand::And;
+    Operator op = Operator::And;
     int8 indent = 0;
     char name[64];
+    bool val = false;
 };
 
+void pushDimTextStyle()
+{
+  ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1,1,1,0.3f));
+}
+                
+void popDimTextStyle()
+{
+  ImGui::PopStyleColor(1);
+}
 
 void pushDimButtonStyle(bool dimText = false)
 {
@@ -99,10 +111,10 @@ void popLightButtonStyle()
   ImGui::PopStyleColor(3);
 }
 
-void pushOperandButtonStyle(const Operand op)
+void pushOperatorButtonStyle(const Operator op)
 {
   ImVec4 col;
-  if (op == Operand::And)
+  if (op == Operator::And)
     col = ImVec4(0.75f, 0.5f, 1.0f, 1.0f);
   else
     col = ImVec4(0.75f, 1.0f, 0.5f, 1.0f);
@@ -112,7 +124,7 @@ void pushOperandButtonStyle(const Operand op)
   ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(col.x, col.y, col.z, 0.7f));
 }
                 
-void popOperandButtonStyle()
+void popOperatorButtonStyle()
 {
   ImGui::PopStyleColor(3);
 }
@@ -154,11 +166,11 @@ void loop()
   static bool initDone = false;
   if (!initDone)
   {
-    conditions[0].set(0, Operand::And, "Is Hungry");
-    conditions[1].set(1, Operand::Or, "Is Thirsty");
-    conditions[2].set(0, Operand::And, "Is Dog");
-    conditions[3].set(2, Operand::Or, "Is Cat");
-    conditions[4].set(1, Operand::And, "Is Green");
+    conditions[0].set(0, Operator::And, "Is Hungry");
+    conditions[1].set(1, Operator::Or, "Is Thirsty");
+    conditions[2].set(0, Operator::And, "Is Dog");
+    conditions[3].set(2, Operator::Or, "Is Cat");
+    conditions[4].set(1, Operator::And, "Is Green");
     numConditions = 5;
 
     initDone = true;
@@ -245,7 +257,7 @@ void loop()
       const ImVec2 indentMinusSize(indentStep, ImGui::GetFrameHeight());
 
       pushDimButtonStyle(/*dimText*/true);
-      if (ImGui::Button(">##indent+", indentPlusSize))
+      if (ImGui::Button("+##indent+", indentPlusSize))
       {
         if ((c.indent+1) < MaxIndent)
           c.indent++;
@@ -261,7 +273,7 @@ void loop()
         ImGui::SameLine();
         ImGui::PushID(j);
         pushDimButtonStyle(/*dimText*/true);
-        if (ImGui::Button("|##indent-", indentMinusSize))
+        if (ImGui::Button("·##indent-", indentMinusSize))
         {
             c.indent--;
         }
@@ -275,31 +287,31 @@ void loop()
 
     }
 
-    // Operand
-    ImVec2 operandSize(indentStep, ImGui::GetFrameHeight());
+    // Operator
+    ImVec2 operatorSize(indentStep, ImGui::GetFrameHeight());
 
     ImGui::SameLine();
     if (i == 0)
     {
       // There is no operator on first line, but we need to space for things to line up, could be empty too, using IF so that the whole tlooks like condition.
       pushDimButtonStyle();
-      ImGui::Button("IF", operandSize);
+      ImGui::Button("IF", operatorSize);
       popDimButtonStyle();
     }
     else
     {
-      pushOperandButtonStyle(c.op);
-      if (ImGui::Button(opName[(int)c.op], operandSize))
+      pushOperatorButtonStyle(c.op);
+      if (ImGui::Button(opName[(int)c.op], operatorSize))
         ImGui::OpenPopup("cond_op");
-      popOperandButtonStyle();
+      popOperatorButtonStyle();
     }
 
     if (ImGui::BeginPopup("cond_op"))
     {
       if (ImGui::Selectable("AND"))
-          c.op = Operand::And;
+          c.op = Operator::And;
       if (ImGui::Selectable("OR"))
-          c.op = Operand::Or;
+          c.op = Operator::Or;
       ImGui::EndPopup();
     }
 
@@ -331,6 +343,14 @@ void loop()
     // closed parens
     ImGui::SameLine();
     ImGui::Text("%.*s", closedParens, "))))");
+
+    // Value
+    ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - ImGui::GetFrameHeight() * 3);
+    ImGui::Checkbox("##val", &c.val);
+    if (shouldShowTooltip())
+    {
+      ImGui::SetTooltip("Value to be used for debug evaluation below.");
+    }
 
     // Reorder
     ImVec2 reorderSize(ImGui::GetFrameHeight(), ImGui::GetFrameHeight());
@@ -382,6 +402,83 @@ void loop()
 
   ImGui::Separator();
 
+  // Eval
+
+  ImGui::Text("Evaluation");
+
+  bool vals[MaxIndent+1] = { false, false, false, false, false };
+  Operator ops[MaxIndent+1] = { Operator::Copy, Operator::Copy, Operator::Copy, Operator::Copy, Operator::Copy };
+
+  int level = 0;
+
+  for (int i = 0; i < numConditions; i++)
+  {
+    const Cond& c = conditions[i];
+
+    // First one is copy, as there's no previous value.
+    Operator currOp = i == 0 ? Operator::Copy : c.op;
+    // These can be precalculated
+    const int currIndent = i == 0 ? 0 : c.indent;
+    const int nextIndent = (i + 1) < numConditions ? conditions[i+1].indent : 0;
+    const int delta = nextIndent - currIndent;
+    // +1 is used to store the current value at the top of the vals stack.
+    const int openParens = (delta > 0 ? delta : 0) + 1;
+    const int closedParens = (delta < 0 ? -delta : 0) + 1;
+
+    // Store how to combine the upper level value down when coming back to this level
+    ops[level] = currOp;
+
+    // Evaluate condition and store result
+    level += openParens;
+    vals[level] = c.eval();
+
+    ImGui::Text("[%d] = %s", level, c.name);
+    ImGui::SameLine();
+    pushDimTextStyle();
+    ImGui::Text("%s", c.val ? "True" : "False");
+    popDimTextStyle();
+
+    // Combine stack down.
+    ImGui::Indent();
+    for (int j = 0; j < closedParens; j++)
+    {
+      level--;
+
+      ImGui::Text("[%d]", level);
+      ImGui::SameLine();
+      pushDimTextStyle();
+      ImGui::Text("%s", vals[level] ? "True" : "False");
+      popDimTextStyle();
+      ImGui::SameLine();
+      ImGui::Text("%s= [%d]", opNameShort[(int)ops[level]], level+1);
+      ImGui::SameLine();
+      pushDimTextStyle();
+      ImGui::Text("%s", vals[level+1] ? "True" : "False");
+      popDimTextStyle();
+
+      switch (ops[level])
+      {
+        case Operator::Copy:
+          vals[level] = vals[level+1];
+          break;
+        case Operator::And:
+          vals[level] &= vals[level+1];
+          break;
+        case Operator::Or:
+          vals[level] |= vals[level+1];
+          break;
+      }
+      ops[level] = Operator::Copy;
+    }
+    ImGui::Unindent();
+  }
+
+  ImGui::Text("Result = ");
+  ImGui::SameLine();
+  pushDimTextStyle();
+  ImGui::Text("%s", vals[0] ? "True" : "False");
+  popDimTextStyle();
+
   ImGui::End();
 
 
@@ -389,23 +486,17 @@ void loop()
   ImGui::SetNextWindowSize(ImVec2(350, 600), ImGuiCond_FirstUseEver);
   ImGui::Begin("Help", &show_help_window);
 
-  ImGui::TextWrapped("This is an example of boolean expression editor."); ImGui::Spacing();
-  ImGui::TextWrapped("Each condition is at it's own row. The operator is applied between the current and previous condition. No operator precedence, operations are combined in order."); ImGui::Spacing();
-  ImGui::TextWrapped("Each line can be indented to create more complicated expressions."); ImGui::Spacing();
-  ImGui::TextWrapped("Diff between the idents defines how many braces open or close between the condition lines. The more you indent, the more the line will be associated with the previous line."); ImGui::Spacing();
+  ImGui::TextWrapped("This is an example of a simple boolean expression editor and evaluation."); ImGui::Spacing();
+  ImGui::TextWrapped("Conditions are on individual rows. The operator is applied between the current and previous condition, no operator precedence."); ImGui::Spacing();
+  ImGui::TextWrapped("Each line can be indented to add parenthesis and to create more complicated expressions."); ImGui::Spacing();
+  ImGui::TextWrapped("Difference in the identation between the condition lines defines how many paretheses are opened or closed. One way to think about this is that, the more you indent, the more the line will be associated with the previous line."); ImGui::Spacing();
 
   ImGui::Separator();
+  ImGui::TextWrapped("The indentation UI can be made in many different ways. Here are two examples, using a drop down or buttons."); ImGui::Spacing();
   if (ImGui::RadioButton("Use indent drop down", useIndentDropdown)) useIndentDropdown = true;
-  if (ImGui::RadioButton("Use ident buttons", !useIndentDropdown)) useIndentDropdown = false;
+  if (ImGui::RadioButton("Use indent buttons", !useIndentDropdown)) useIndentDropdown = false;
 
   ImGui::End();
-
-  // 3. Show the ImGui demo window. Most of the sample code is in ImGui::ShowDemoWindow(). Read its code to learn more about Dear ImGui!
-/*  if (show_demo_window)
-  {
-      ImGui::SetNextWindowPos(ImVec2(650, 20), ImGuiCond_FirstUseEver); // Normally user code doesn't need/want to call this because positions are saved in .ini file anyway. Here we just want to make the demo initial state a bit more friendly!
-      ImGui::ShowDemoWindow(&show_demo_window);
-  }*/
 
   ImGui::Render();
 

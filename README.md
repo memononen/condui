@@ -4,25 +4,25 @@
 
 # Condition UI example in Dear ImGui
 
-This is an example of boolean expression editor.
+This is an example of a simple boolean expression editor and evaluation..
 
-Each condition is at it's own row. The operator is applied between the current and previous condition. No operator precedence, operations are combined in order.
+Conditions are on individual rows. The operator is applied between the current and previous condition, no operator precedence.
 
-Each line can be indented to create more complicated expressions.
+Each line can be indented to add parenthesis and to create more complicated expressions.
 
-Diff between the idents defines how many braces open or close between the condition lines. The more you indent, the more the line will be associated with the previous line.
+Difference in the identation between the condition lines defines how many paretheses are opened or closed. One way to think about this is that, the more you indent, the more the line will be associated with the previous line.
 
 ## Motivation
 
-Boolean expression UIs are needed in many applications, like search queries, or conditions in game logic (transitions, enter conditions, etc). Common approaches are to make such UI is to use a treeview using prefix or python style all/any containers, or some custom horizontal editor.
+Boolean expression UIs are needed in many applications, like search queries, or conditions in game logic (transitions, enter conditions, etc). Common approaches are to make such UI is to use a treeview using prefix notation or python style all/any containers, or some custom horizontal editor.
 
-They both require complicated logic, and refactoring an expression becomes really hard, depending on the UI framework, you may be required to redo the whole thing, if you want to encapsulate a branch.
+They all require complicated UI logic, and refactoring an expression usually becomes really hard. Depending on the UI framework, you may be required to redo the whole thing, if you want to encapsulate a branch.
 
-Complex conditions are hard to express even in code, which is usually the most versatile format. There is certain cap how much indentation a person can handle when trying to decipher such condition.
+Complex conditions are hard to express even in code, which is usually the most versatile format. Even there the congnitive load to decipher and refactor a complex expression is high.
 
-Another thing to consider is that a lot of game engine editors are based on property grids, where each property is shown at separate line. Even if that was not an issue, the space for editing the conditions is usually very narrow, so a solution that expands vertically is going to work there better.
+Another thing to consider is that a lot of game engine editors are based on property grids, where each property is shown at separate line. The space for editing the conditions are usually very narrow, so a solution that expands vertically is needed.
 
-This solutions aims to be quick to use, legible, vertical, and user proof. For example solutions that would deal with parentheses directly, could create expressions that are not valid. This method creates always valid expressions, even if it might not be correct (e.g. during array reorder).
+This solutions aims to be quick to use, legible, vertical, and user proof. Mouse clicks can be minimized in the UI to make changing the expressions quick. Indentation and parentheses both make the expressions easy to read (there is similar style used on code too). This method creates always valid expressions, even if it might not be correct (e.g. during refactoring).
 
 ---
 
