@@ -1,6 +1,6 @@
 ![Screenshot](/img/screenshot.png)
 
-- [Demo](https://memononen.github.io/condui/imgui.html)
+- Live Wasm [Demo](https://memononen.github.io/condui/imgui.html)
 
 # Condition UI example in Dear ImGui
 
