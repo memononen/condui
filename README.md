@@ -8,9 +8,31 @@ This is an example of a simple boolean expression editor and evaluation..
 
 Conditions are on individual rows. The operator is applied between the current and previous condition, no operator precedence.
 
+```
+if  IsDog 
+or  IsCat
+and IsHungry
+```
+
 Each line can be indented to add parenthesis and to create more complicated expressions.
 
+```
+if  (IsDog 
+    or  IsCat)
+and (IsHungry
+    or  IsThirsty)
+```
+
 Difference in the identation between the condition lines defines how many paretheses are opened or closed. One way to think about this is that, the more you indent, the more the line will be associated with the previous line.
+
+```
+if  ((IsDog 
+        or  IsCat)
+    and IsPet)
+and (IsNearHome
+    and (IsHungry
+        or  IsThirsty))
+```
 
 ## Motivation
 

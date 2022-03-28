@@ -166,11 +166,11 @@ void loop()
   static bool initDone = false;
   if (!initDone)
   {
-    conditions[0].set(0, Operator::And, "Is Hungry");
-    conditions[1].set(1, Operator::Or, "Is Thirsty");
-    conditions[2].set(0, Operator::And, "Is Dog");
-    conditions[3].set(2, Operator::Or, "Is Cat");
-    conditions[4].set(1, Operator::And, "Is Green");
+    conditions[0].set(0, Operator::And, "IsDog");
+    conditions[1].set(2, Operator::Or, "IsCat");
+    conditions[2].set(0, Operator::And, "IsNearHome");
+    conditions[3].set(1, Operator::And, "IsHungry");
+    conditions[4].set(2, Operator::Or, "IsIsThirsty");
     numConditions = 5;
 
     initDone = true;
