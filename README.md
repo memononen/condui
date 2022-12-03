@@ -1,12 +1,12 @@
 ![Screenshot](/img/screenshot.png)
 
-- Live Wasm [Demo](https://memononen.github.io/condui/imgui.html)
-
 # Condition UI example in Dear ImGui
+
+- **Live [Demo](https://memononen.github.io/condui/web/index.html)**
 
 This is an example of a simple boolean expression editor and evaluation..
 
-Conditions are on individual rows. The operator is applied between the current and previous condition, no operator precedence.
+Conditions are on individual rows. The operator is applied between the current and previous condition, no operator precedence (there's automatic way to add extra indentation to have precedence, though).
 
 ```
 if  IsDog 
@@ -26,7 +26,7 @@ and (IsHungry
 Difference in the identation between the condition lines defines how many paretheses are opened or closed. One way to think about this is that, the more you indent, the more the line will be associated with the previous line.
 
 ```
-if  ((IsDog 
+if  (   (IsDog 
         or  IsCat)
     and IsPet)
 and (IsNearHome
@@ -45,6 +45,14 @@ Complex conditions are hard to express even in code, which is usually the most v
 Another thing to consider is that a lot of game engine editors are based on property grids, where each property is shown at separate line. The space for editing the conditions are usually very narrow, so a solution that expands vertically is needed.
 
 This solutions aims to be quick to use, legible, vertical, and user proof. Mouse clicks can be minimized in the UI to make changing the expressions quick. Indentation and parentheses both make the expressions easy to read (there is similar style used on code too). This method creates always valid expressions, even if it might not be correct (e.g. during refactoring).
+
+## Operator precedence
+
+Operator precedence is hard. Some recent languages have opted to make it an error if different operators are used in same sub-expression. The basic version this code does not do any operator precedence, but there's option to automatically add parenthesis to achieve that. I think it is more confusing to use and adds quite a bit more complexity.
+
+I experimented with with different options for the UI to maybe automatically adjust the operators at the same sub-expression
+to match. In many cases this led more confusing experience. In the end the solution that felt least resticting was to add a
+warning when an expression has different operators and a button to resolve the conflict. 
 
 ---
 

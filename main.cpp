@@ -2,10 +2,13 @@
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
-#endif
-
 #define GLFW_INCLUDE_ES3
 #include <GLES3/gl3.h>
+#include <GLFW/glfw3.h>
+#endif
+
+#define GLFW_INCLUDE_GLEXT
+#define GLFW_INCLUDE_GLCOREARB
 #include <GLFW/glfw3.h>
 
 #include "imgui.h"
@@ -20,36 +23,45 @@ ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
 bool show_demo_window = true;
 bool show_window = true;
 bool show_help_window = true;
-int g_width;
-int g_height;
+int g_width = 0;
+int g_height = 0;
 
 EM_JS(int, canvas_get_width, (), {
-  return Module.canvas.width;
+  return Module.canvas.clientWidth;
 });
 
 EM_JS(int, canvas_get_height, (), {
-  return Module.canvas.height;
+  return Module.canvas.clientHeight;
 });
-
-EM_JS(void, resizeCanvas, (), {
-  js_resizeCanvas();
-});
-
-void on_size_changed()
-{
-  glfwSetWindowSize(g_window, g_width, g_height);
-
-  ImGui::SetCurrentContext(ImGui::GetCurrentContext());
-}
 
 typedef unsigned char uint8;
 typedef signed char int8;
 
 enum class Operator : uint8 { Copy = 0, And, Or, };
-const char* opName[] = { "=", "AND", "OR", };
+const char* opName[] = { "CP", "AND", "OR", };
 const char* opNameShort[] = { " ", "&", "|", };
 
-constexpr uint8 MaxIndent = 4;
+constexpr uint8 MaxExpressionDepth = 4;
+
+bool apply(const Operator op, const bool lhs, const bool rhs)
+{
+  if (op == Operator::And)
+    return lhs && rhs;
+  if (op == Operator::Or)
+    return lhs || rhs;
+  return rhs; // copy
+}
+
+int maxi(int a, int b) { return a > b ? a : b; }
+int mini(int a, int b) { return a < b ? a : b; }
+
+template <typename T, int N>
+void fill(T (&arr)[N], const T v)
+{
+    for (int i = 0; i < N; i++)
+        arr[i] = v;
+}
+
 
 struct Cond
 {
@@ -60,18 +72,48 @@ struct Cond
 
     bool eval() const { return val; }
 
-    void set(int8 _indent, Operator _op, const char* _name)
+    void set(int8 _depth, Operator _op, const char* _name)
     {
-      indent = _indent;
+      depth = _depth;
       op = _op;
       strcpy(name, _name);
     }
 
     Operator op = Operator::And;
-    int8 indent = 0;
+    int8 depth = 0;     // current expression depth, this is easier to understand in the UI
+    int8 nextDepth = 0; // next items expression depth, this is used during evaluation
     char name[64];
     bool val = false;
 };
+
+// Find next operator in the same sub-expression
+int findNextOpIndex(const Cond* conds, const int numConds, int index)
+{
+  const int initialDepth = conds[index].depth;
+  for (int i = index+1; i < numConds; i++)
+  {
+    if (conds[i].depth < initialDepth)
+      return -1;
+    if (conds[i].depth == initialDepth)
+      return i;
+  }
+  return -1;
+}
+
+// Finds first operator in the same sub-expression.
+int getFirstOperatorIndex(const Cond* conds, const int numConds, int index)
+{
+  int result = index;
+  const int initialDepth = conds[index].depth; 
+  for (int i = index-1; i > 0; i--) // omitting 0, as it does not have operator.
+  {
+    if (conds[i].depth < initialDepth)
+      break;
+    if (conds[i].depth == initialDepth && conds[i].op != Operator::Copy)
+      result = i;
+  }
+  return result;
+}
 
 void pushDimTextStyle()
 {
@@ -79,6 +121,16 @@ void pushDimTextStyle()
 }
                 
 void popDimTextStyle()
+{
+  ImGui::PopStyleColor(1);
+}
+
+void pushRedTextStyle()
+{
+  ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1,0.2f,0.2f,0.8f));
+}
+                
+void popRedTextStyle()
 {
   ImGui::PopStyleColor(1);
 }
@@ -95,6 +147,31 @@ void pushDimButtonStyle(bool dimText = false)
 }
                 
 void popDimButtonStyle()
+{
+  ImGui::PopStyleColor(4);
+}
+
+void pushNonButtonStyle()
+{
+  ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0,0,0,0));
+  ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0,0,0,0));
+  ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0,0,0,0));
+}
+                
+void popNonButtonStyle()
+{
+  ImGui::PopStyleColor(3);
+}
+
+void pushWarningButtonStyle()
+{
+  ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1,0.7f,0.2f,0.7f));
+  ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1,0.7f,0.2,0.9f));
+  ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1,0.7f,0.2,0.9f));
+  ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0,0,0,1));
+}
+                
+void popWarningButtonStyle()
 {
   ImGui::PopStyleColor(4);
 }
@@ -136,9 +213,46 @@ bool shouldShowTooltip()
           && !ImGui::IsItemFocused();
 }
 
+void dumpState(const int opDepth, const int valDepth, const Operator* ops, const bool* vals, const int count)
+{
+  ImGui::TableNextRow();
+
+  // dummy
+  ImGui::TableNextColumn();
+
+  for (int i = 0; i < count; i++)
+  {
+    ImGui::TableNextColumn();
+
+    if (i <= valDepth)
+    {
+      if (i != opDepth)
+        pushDimTextStyle();
+
+      ImGui::Text("%s", opNameShort[(int)ops[i]]);
+
+      if (i != opDepth)
+        popDimTextStyle();
+
+      if (i != valDepth)
+        pushDimTextStyle();
+
+      ImGui::SameLine();
+      ImGui::Text("%s", vals[i] ? "T" : "F");
+
+      if (i != valDepth)
+        popDimTextStyle();
+    }
+  }
+
+  ImGui::TableNextColumn();
+}
+
 
 void loop()
 {
+#ifdef __EMSCRIPTEN__
+
   int width = canvas_get_width();
   int height = canvas_get_height();
 
@@ -146,13 +260,18 @@ void loop()
   {
     g_width = width;
     g_height = height;
-    on_size_changed();
+
+    glfwSetWindowSize(g_window, g_width, g_height);
+
+    ImGui::SetCurrentContext(ImGui::GetCurrentContext());
   }
+#endif
 
   glfwPollEvents();
 
   ImGui_ImplOpenGL3_NewFrame();
   ImGui_ImplGlfw_NewFrame();
+
   ImGui::NewFrame();
 
 
@@ -161,23 +280,27 @@ void loop()
   static Cond conditions[MaxConditions];
   static int numConditions = 0;
 
-  static bool useIndentDropdown = false;
+  static bool useDepthDropdown = false;
+  static bool usePrecedence = false;
+  static bool guideOperatorUsage = true;
+  static bool useShortCircuit = true;
 
   static bool initDone = false;
   if (!initDone)
   {
     conditions[0].set(0, Operator::And, "IsDog");
-    conditions[1].set(2, Operator::Or, "IsCat");
+    conditions[1].set(1, Operator::Or, "IsCat");
     conditions[2].set(0, Operator::And, "IsNearHome");
     conditions[3].set(1, Operator::And, "IsHungry");
-    conditions[4].set(2, Operator::Or, "IsIsThirsty");
+    conditions[4].set(2, Operator::Or, "IsThirsty");
+
     numConditions = 5;
 
     initDone = true;
   }
 
   ImGui::SetNextWindowPos(ImVec2(50, 20), ImGuiCond_FirstUseEver);
-  ImGui::SetNextWindowSize(ImVec2(400, 600), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSize(ImVec2(500, 600), ImGuiCond_FirstUseEver);
   ImGui::Begin("Conditions", &show_window);
 
   ImGui::Separator();
@@ -208,83 +331,108 @@ void loop()
   char label[128];
   ImGuiStyle& style = ImGui::GetStyle();
 
+  bool precedence[MaxExpressionDepth];   // true if specific depth is processing in high precedence operator 
+  bool pendingClose[MaxExpressionDepth]; // true if specific depth should close parenthesis (due to high precedence operator) after the children has been processed
+  fill(precedence, false);
+  fill(pendingClose, false);
+
+
+  const float indentStep = ImGui::GetFontSize() * 2;
+  const float smallIndentStep = ImGui::GetFontSize();
+
   for (int i = 0; i < numConditions; i++)
   {
-    Cond& c = conditions[i];
+    Cond& cond = conditions[i];
 
-    const int currIndent = i == 0 ? 0 : c.indent;
-    const int nextIndent = (i + 1) < numConditions ? conditions[i+1].indent : 0;
-    const int delta = nextIndent - currIndent;
+    const int currDepth = i == 0 ? 0 : cond.depth;
+    const int nextDepth = (i + 1) < numConditions ? conditions[i+1].depth : 0;
+    const int delta = nextDepth - currDepth;
     const int openParens = delta > 0 ? delta : 0;
     const int closedParens = delta < 0 ? -delta : 0;
+
+    const int nextOpIndex = findNextOpIndex(conditions, numConditions, i);
+    const Operator nextOp = nextOpIndex != -1 ? conditions[nextOpIndex].op : Operator::Copy;
 
     ImGui::PushID(i);
 
     ImGui::BeginGroup();
 
-    // indent
-    const float indentStep = ImGui::GetFontSize() * 2;
-
-    if (useIndentDropdown)
+    // indent from depth
+    if (i > 0)
     {
-      // UI option 1, use a dropdown.
-      const ImVec2 indentSize(ImGui::GetFontSize() + (indentStep + style.ItemSpacing.x) * c.indent, ImGui::GetFrameHeight());
-
-      pushDimButtonStyle();
-      if (ImGui::Button("##indent", indentSize))
+      if (useDepthDropdown)
       {
-        ImGui::OpenPopup("cond_indent");
-      }
-      popDimButtonStyle();
+        // UI option 1, use a dropdown.
+        const ImVec2 indentSize(ImGui::GetFontSize() + (indentStep + style.ItemSpacing.x) * cond.depth, ImGui::GetFrameHeight());
 
-      if (ImGui::BeginPopup("cond_indent"))
-      {
-        for (int j = 0; j < MaxIndent; j++)
+        pushDimButtonStyle();
+        if (ImGui::Button("##depth", indentSize))
         {
-          ImGui::PushID(j);
-          snprintf(label, IM_ARRAYSIZE(label), "%d", j);
-          if (ImGui::Selectable(label, c.indent == j))
-              c.indent = j;
-          ImGui::PopID();
+          ImGui::OpenPopup("cond_depth");
         }
-        ImGui::EndPopup();
+        popDimButtonStyle();
+
+        if (ImGui::BeginPopup("cond_depth"))
+        {
+          for (int j = 0; j < MaxExpressionDepth; j++)
+          {
+            ImGui::PushID(j);
+            snprintf(label, IM_ARRAYSIZE(label), "%d", j);
+            if (ImGui::Selectable(label, cond.depth == j))
+                cond.depth = j;
+            ImGui::PopID();
+          }
+          ImGui::EndPopup();
+        }
+      }
+      else
+      {
+        const ImVec2 incSize(smallIndentStep, ImGui::GetFrameHeight());
+        const ImVec2 decSize(indentStep, ImGui::GetFrameHeight());
+
+        if (i > 0)
+        {
+          // UI option 2, use buttons, one for add, and each depth step has remove.
+          pushDimButtonStyle(true);
+          if (ImGui::Button("+##depth+", incSize))
+          {
+            if ((cond.depth+1) < MaxExpressionDepth)
+              cond.depth++;
+          }
+          popDimButtonStyle();
+          if (shouldShowTooltip())
+          {
+            ImGui::SetTooltip("Increase operand depth.");
+          }
+
+          for (int j = 0; j < cond.depth; j++)
+          {
+            ImGui::SameLine();
+            ImGui::PushID(j);
+            pushDimButtonStyle(/*dimText*/true);
+            if (ImGui::Button("-##depth-", decSize))
+            {
+                cond.depth--;
+            }
+            popDimButtonStyle();
+
+            if (shouldShowTooltip())
+            {
+              ImGui::SetTooltip("Decrease operand depth.");
+            }
+
+            ImGui::PopID();
+          }
+        }
       }
     }
     else
     {
-      // UI option 2, use buttons, one for add, and each indent is remove.
-      const ImVec2 indentPlusSize(ImGui::GetFontSize(), ImGui::GetFrameHeight());
-      const ImVec2 indentMinusSize(indentStep, ImGui::GetFrameHeight());
+      const ImVec2 incSize(smallIndentStep, ImGui::GetFrameHeight());
 
-      pushDimButtonStyle(/*dimText*/true);
-      if (ImGui::Button("+##indent+", indentPlusSize))
-      {
-        if ((c.indent+1) < MaxIndent)
-          c.indent++;
-      }
-      popDimButtonStyle();
-      if (shouldShowTooltip())
-      {
-        ImGui::SetTooltip("Add indent.");
-      }
-
-      for (int j = 0; j < c.indent; j++)
-      {
-        ImGui::SameLine();
-        ImGui::PushID(j);
-        pushDimButtonStyle(/*dimText*/true);
-        if (ImGui::Button("·##indent-", indentMinusSize))
-        {
-            c.indent--;
-        }
-        popDimButtonStyle();
-        if (shouldShowTooltip())
-        {
-          ImGui::SetTooltip("Remove indent.");
-        }
-        ImGui::PopID();
-      }
-
+      pushNonButtonStyle();
+      ImGui::Button("", incSize);
+      popNonButtonStyle();
     }
 
     // Operator
@@ -300,8 +448,8 @@ void loop()
     }
     else
     {
-      pushOperatorButtonStyle(c.op);
-      if (ImGui::Button(opName[(int)c.op], operatorSize))
+      pushOperatorButtonStyle(cond.op);
+      if (ImGui::Button(opName[(int)cond.op], operatorSize))
         ImGui::OpenPopup("cond_op");
       popOperatorButtonStyle();
     }
@@ -309,20 +457,69 @@ void loop()
     if (ImGui::BeginPopup("cond_op"))
     {
       if (ImGui::Selectable("AND"))
-          c.op = Operator::And;
+          cond.op = Operator::And;
       if (ImGui::Selectable("OR"))
-          c.op = Operator::Or;
+          cond.op = Operator::Or;
       ImGui::EndPopup();
     }
 
+    if (usePrecedence)
+    {
+      // Extra parens from precedence
+      if (!precedence[currDepth])
+      {
+        if (cond.op == Operator::Or && nextOp == Operator::And)
+        {
+          pushDimTextStyle();
+          ImGui::SameLine();
+          ImGui::Text("(");
+          popDimTextStyle();
+
+          precedence[currDepth] = true;
+        }
+      }
+    }
+    else if (guideOperatorUsage)
+    {
+      const int firstOpIndex = getFirstOperatorIndex(conditions, numConditions, i);
+      const Operator firstOp = conditions[firstOpIndex].op;
+      if (firstOp != conditions[i].op)
+      {
+        // Warn about different operators.
+        pushWarningButtonStyle();
+        ImGui::SameLine();
+        if (ImGui::Button("!"))
+        {
+          conditions[i].op = firstOp;
+        }
+        popWarningButtonStyle();
+        if (shouldShowTooltip())
+        {
+          ImGui::SetTooltip("The operator is different from others in the sub-expression.\nThis can cause misinterpretation of the expression.\nClick to use the same operator as above.");
+        }
+      }
+    }
+
     // open parens
-    ImGui::SameLine();
-    ImGui::Text("%.*s", openParens, "((((");
+    for (int j = 0; j < openParens-1; j++)
+    {
+      ImGui::SameLine();
+      pushNonButtonStyle();
+      ImGui::Button("(", operatorSize);
+      popNonButtonStyle();
+    }
+
+    // the last parent goes at the same depth as the operand, associates better visually.
+    if (openParens > 0)
+    {
+      ImGui::SameLine();
+      ImGui::Text("(");
+    }
 
     // name
     pushLightButtonStyle();
     ImGui::SameLine();
-    snprintf(label, IM_ARRAYSIZE(label), "%s###name", c.name);
+    snprintf(label, IM_ARRAYSIZE(label), "%s###name", cond.name);
     bool focusName = false;
     if (ImGui::Button(label))
     {
@@ -335,18 +532,70 @@ void loop()
     {
       if (focusName)
         ImGui::SetKeyboardFocusHere();
-      if (ImGui::InputText("##edit", c.name, IM_ARRAYSIZE(c.name), ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll))
+      if (ImGui::InputText("##edit", cond.name, IM_ARRAYSIZE(cond.name), ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll))
           ImGui::CloseCurrentPopup();
       ImGui::EndPopup();
     }
 
     // closed parens
-    ImGui::SameLine();
-    ImGui::Text("%.*s", closedParens, "))))");
+    if (usePrecedence)
+    {
+      // Interleave parens from depth and precedence.
+      for (int j = 0; j < closedParens; j++)
+      {
+        if (precedence[currDepth-j])
+        {
+          pushDimTextStyle();
+          ImGui::SameLine();
+          ImGui::Text(")");
+          popDimTextStyle();
+
+          precedence[currDepth-j] = false;
+        }
+
+        ImGui::SameLine();
+        ImGui::Text(")");
+      }
+
+      if (precedence[currDepth])
+      {
+        if (cond.op == Operator::And && nextOp != Operator::And)
+        {
+          if (openParens == 0)
+          {
+            pushDimTextStyle();
+            ImGui::SameLine();
+            ImGui::Text(")");
+            popDimTextStyle();
+            precedence[currDepth] = false;
+          }
+          else
+            pendingClose[currDepth] = true;
+        }
+      }
+
+      if (closedParens > 0 && pendingClose[currDepth-closedParens])
+      {
+        pushDimTextStyle();
+        ImGui::SameLine();
+        ImGui::Text(")");
+        popDimTextStyle();
+        precedence[currDepth-closedParens] = false;
+        pendingClose[currDepth-closedParens] = false;
+      }
+    }
+    else
+    {
+      for (int j = 0; j < closedParens; j++)
+      {
+        ImGui::SameLine();
+        ImGui::Text(")");
+      }
+    }
 
     // Value
     ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - ImGui::GetFrameHeight() * 3);
-    ImGui::Checkbox("##val", &c.val);
+    ImGui::Checkbox("##val", &cond.val);
     if (shouldShowTooltip())
     {
       ImGui::SetTooltip("Value to be used for debug evaluation below.");
@@ -367,7 +616,7 @@ void loop()
     if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_None))
     {
       ImGui::SetDragDropPayload("DND_CONDITION", &i, sizeof(int));
-      ImGui::Text("Reorder %s", c.name);
+      ImGui::Text("Reorder %s", cond.name);
       ImGui::EndDragDropSource();
     }
 
@@ -397,81 +646,181 @@ void loop()
     }
 
     ImGui::PopID();
-
   }
 
   ImGui::Separator();
 
   // Eval
 
-  ImGui::Text("Evaluation");
+  // Precalculate nextDepth, and apply precedence.
+  fill(precedence, false);
+  fill(pendingClose, false);
 
-  bool vals[MaxIndent+1] = { false, false, false, false, false };
-  Operator ops[MaxIndent+1] = { Operator::Copy, Operator::Copy, Operator::Copy, Operator::Copy, Operator::Copy };
-
-  int level = 0;
+  int maxDepth = 0;
+  int precedenceDepth = 0; // extra depth added by precedence
 
   for (int i = 0; i < numConditions; i++)
   {
-    const Cond& c = conditions[i];
+    Cond& cond = conditions[i];
+    const bool nextValid = (i + 1) < numConditions;
 
-    // First one is copy, as there's no previous value.
-    Operator currOp = i == 0 ? Operator::Copy : c.op;
-    // These can be precalculated
-    const int currIndent = i == 0 ? 0 : c.indent;
-    const int nextIndent = (i + 1) < numConditions ? conditions[i+1].indent : 0;
-    const int delta = nextIndent - currIndent;
-    // +1 is used to store the current value at the top of the vals stack.
-    const int openParens = (delta > 0 ? delta : 0) + 1;
-    const int closedParens = (delta < 0 ? -delta : 0) + 1;
+    const int currDepth = conditions[i].depth;
+    const int nextDepth = nextValid ? conditions[i+1].depth : 0;
+    const int nextOpIndex = findNextOpIndex(conditions, numConditions, i);
+    const Operator nextOp = nextOpIndex != -1 ? conditions[nextOpIndex].op : Operator::Copy;
 
-    // Store how to combine the upper level value down when coming back to this level
-    ops[level] = currOp;
+    maxDepth = maxi(maxDepth, currDepth);
 
-    // Evaluate condition and store result
-    level += openParens;
-    vals[level] = c.eval();
-
-    ImGui::Text("[%d] = %s", level, c.name);
-    ImGui::SameLine();
-    pushDimTextStyle();
-    ImGui::Text("%s", c.val ? "True" : "False");
-    popDimTextStyle();
-
-    // Combine stack down.
-    ImGui::Indent();
-    for (int j = 0; j < closedParens; j++)
+    if (usePrecedence)
     {
-      level--;
-
-      ImGui::Text("[%d]", level);
-      ImGui::SameLine();
-      pushDimTextStyle();
-      ImGui::Text("%s", vals[level] ? "True" : "False");
-      popDimTextStyle();
-      ImGui::SameLine();
-      ImGui::Text("%s= [%d]", opNameShort[(int)ops[level]], level+1);
-      ImGui::SameLine();
-      pushDimTextStyle();
-      ImGui::Text("%s", vals[level+1] ? "True" : "False");
-      popDimTextStyle();
-
-      switch (ops[level])
+      // add paren due to operator precedence
+      if (!precedence[currDepth])
       {
-        case Operator::Copy:
-          vals[level] = vals[level+1];
-          break;
-        case Operator::And:
-          vals[level] &= vals[level+1];
-          break;
-        case Operator::Or:
-          vals[level] |= vals[level+1];
-          break;
+        if (cond.op == Operator::Or && nextOp == Operator::And)
+        {
+          precedence[currDepth] = true;
+          precedenceDepth++;
+        }
       }
-      ops[level] = Operator::Copy;
+
+      // close precedence due to closing parens.
+      for (int j = currDepth; j > nextDepth; j--)
+      {
+        if (precedence[j])
+        {
+          precedence[j] = false;
+          precedenceDepth--;
+        }
+      }
+
+      // close precedence due to starting "or" or end of (sub)expression.
+      if (precedence[currDepth])
+      {
+        if (cond.op == Operator::And && nextOp != Operator::And)
+        {
+          if (nextDepth >= currDepth)
+            precedence[currDepth] = false;
+          else
+            pendingClose[currDepth] = true; // should close, but this line open sub-expression, postpone until closed.
+          precedenceDepth--;
+        }
+      }
+
+      // close pending precedence, this is done when we detect that we should close
+      // precedence at the beginning of a sub-expression, the paren goes after the sub-expression.
+      if (nextDepth < currDepth && pendingClose[nextDepth])
+      {
+        precedence[nextDepth] = false;
+        pendingClose[nextDepth] = false;
+      }
     }
-    ImGui::Unindent();
+
+    cond.nextDepth = nextValid ? (conditions[i+1].depth + precedenceDepth) : 0;
   }
+
+  const int depthCount = maxDepth+1;
+
+  ImGui::Text("Evaluation");
+  ImGui::BeginTable("eval", 1 + depthCount + 1, ImGuiTableFlags_BordersInnerV);
+  ImGui::TableSetupColumn("pad", ImGuiTableColumnFlags_WidthFixed, smallIndentStep);
+  for (int i = 0; i < depthCount; i++)
+  {
+    snprintf(label, IM_ARRAYSIZE(label), "depth%d", i);
+    ImGui::TableSetupColumn(label, ImGuiTableColumnFlags_WidthFixed, indentStep);
+  }
+  ImGui::TableSetupColumn("res", ImGuiTableColumnFlags_WidthStretch);
+
+  bool vals[MaxExpressionDepth*2+1];
+  Operator ops[MaxExpressionDepth*2+1];
+  fill(vals, false);
+  fill(ops, Operator::Copy);
+
+  constexpr int NoSkip = MaxExpressionDepth+1;
+  int depth = 0;
+  int skipDepth = NoSkip;
+
+  for (int i = 0; i < numConditions; i++)
+  {
+    const Cond& cond = conditions[i];
+    const Operator op = (i == 0) ? Operator::Copy : cond.op;
+
+    // Store how to combine the higher expression depth value down when coming back to this depth level.
+    ops[depth] = op;
+
+    const int opDepth = depth;
+
+    // short circuit
+    // if the right hand side of the expression can be skipped because we know the result
+    // from current value and operator, skip evaluating the right operand, which means
+    // we can skip the whole right sub-expression too. This is done here by just not
+    // evaluating anything with higher depth than the current.
+    if (useShortCircuit)
+    {
+      if (depth <= skipDepth)
+      {
+        if (ops[depth] == Operator::And && vals[depth] == false)
+          skipDepth = depth;
+        else if (ops[depth] == Operator::Or && vals[depth] == true)
+          skipDepth = depth;
+        else
+          skipDepth = NoSkip;
+      }
+    }
+
+    // increase eval depth if needed. (nextDepth - depth) = number of open parenthesis.
+    if (cond.nextDepth > depth)
+      depth = cond.nextDepth;
+
+    // skipping does not really speed up this eval loop, but we expect that the eval() is an expensive
+    // call (virtuals, access other systems, etc), which we try to avoid.
+    const bool canSkipEval = depth >= skipDepth;
+
+    // Evaluate
+    bool val = canSkipEval ? false : cond.eval();
+
+    Operator currOp = ops[depth];
+
+    // Apply the current operand with operator.
+    vals[depth] = apply(ops[depth], vals[depth], val);
+    ops[depth] = Operator::Copy;
+
+    dumpState(opDepth == depth ? -1 : opDepth, depth, ops, vals, depthCount);
+
+    ImGui::Text("[%d]", depth);
+    ImGui::SameLine();
+    ImGui::Text("%s= %s", opNameShort[(int)currOp], cond.name);
+    if (canSkipEval)
+    {
+      ImGui::SameLine();
+      pushRedTextStyle();
+      ImGui::Text("Skip Eval");
+      popRedTextStyle();
+    }
+
+    // Combine stack down. (depth - nextDepth) = number of closing parenthesis.
+    while (depth > cond.nextDepth)
+    {
+      depth--;
+
+      currOp = ops[depth];
+
+      vals[depth] = apply(ops[depth], vals[depth], vals[depth+1]);
+      ops[depth] = Operator::Copy;
+
+      dumpState(depth, depth, ops, vals, depthCount);
+
+      ImGui::Indent();
+
+      ImGui::Text("[%d]", depth);
+      ImGui::SameLine();
+      ImGui::Text("%s= [%d]", opNameShort[(int)currOp], depth+1);
+
+      ImGui::Unindent();
+
+    }
+  }
+
+  ImGui::EndTable();
 
   ImGui::Text("Result = ");
   ImGui::SameLine();
@@ -487,14 +836,34 @@ void loop()
   ImGui::Begin("Help", &show_help_window);
 
   ImGui::TextWrapped("This is an example of a simple boolean expression editor and evaluation."); ImGui::Spacing();
-  ImGui::TextWrapped("Conditions are on individual rows. The operator is applied between the current and previous condition, no operator precedence."); ImGui::Spacing();
-  ImGui::TextWrapped("Each line can be indented to add parenthesis and to create more complicated expressions."); ImGui::Spacing();
-  ImGui::TextWrapped("Difference in the identation between the condition lines defines how many paretheses are opened or closed. One way to think about this is that, the more you indent, the more the line will be associated with the previous line."); ImGui::Spacing();
+  ImGui::TextWrapped("Conditions are on individual rows. The operator is applied between the current and previous condition."); ImGui::Spacing();
+  ImGui::TextWrapped("Each line can be indented to increase it's depth (which adds parenthesis) and to create more complicated expressions."); ImGui::Spacing();
+  ImGui::TextWrapped("Difference in the depth between the condition lines defines how many paretheses are opened or closed. One way to think about this is that, the more you increase the depth, the more the line will be associated with the previous line."); ImGui::Spacing();
 
   ImGui::Separator();
   ImGui::TextWrapped("The indentation UI can be made in many different ways. Here are two examples, using a drop down or buttons."); ImGui::Spacing();
-  if (ImGui::RadioButton("Use indent drop down", useIndentDropdown)) useIndentDropdown = true;
-  if (ImGui::RadioButton("Use indent buttons", !useIndentDropdown)) useIndentDropdown = false;
+  if (ImGui::RadioButton("Use depth drop down", useDepthDropdown)) useDepthDropdown = true;
+  if (ImGui::RadioButton("Use depth buttons", !useDepthDropdown)) useDepthDropdown = false;
+
+  ImGui::Separator();
+  ImGui::TextWrapped("The basic algorithm does not support commonly used operator precedence (ANDs are calculate before ORs), which can add confusion when using same operators in one block"); ImGui::Spacing();
+  ImGui::TextWrapped("Operator precedence can be implemented by adding more parenthesis. The option below enables that and also displays the extra parenthesis."); ImGui::Spacing();
+  if (ImGui::Checkbox("Use precedence", &usePrecedence))
+  {
+    if (usePrecedence)
+      guideOperatorUsage = false;
+  }
+  ImGui::Spacing();
+  ImGui::TextWrapped("Even with precedence the result of mixing operators can be unexpected. An alternative is to guide in the UI to use same operators inside same sub-expression"); ImGui::Spacing();
+  if (ImGui::Checkbox("Guide operator usage", &guideOperatorUsage))
+  {
+    if (guideOperatorUsage)
+      usePrecedence = false;
+  }
+
+  ImGui::Separator();
+  ImGui::TextWrapped("When the expression is used in a game setting, calculating the values of each row can be expensive (e.g. requires virtual function calls to other systems). Short circuiting can be used to skip these function calls."); ImGui::Spacing();
+  ImGui::Checkbox("Use short-circuit", &useShortCircuit);
 
   ImGui::End();
 
@@ -511,22 +880,31 @@ void loop()
   glfwMakeContextCurrent(g_window);
 }
 
+static void errorcb(int error, const char* desc)
+{
+	printf("GLFW error %d: %s\n", error, desc);
+}
 
 int init_gl()
 {
+  
   if( !glfwInit() )
   {
       fprintf( stderr, "Failed to initialize GLFW\n" );
       return 1;
   }
 
+	glfwSetErrorCallback(errorcb);
+
   //glfwWindowHint(GLFW_SAMPLES, 4); // 4x antialiasing
   glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE); // We don't want the old OpenGL
+  glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
 
   // Open a window and create its OpenGL context
-  int canvasWidth = 800;
-  int canvasHeight = 600;
-  g_window = glfwCreateWindow( canvasWidth, canvasHeight, "WebGui Demo", NULL, NULL);
+  g_width = canvas_get_width();
+  g_height = canvas_get_height();
+
+  g_window = glfwCreateWindow(g_width, g_height, "WebGui Demo", NULL, NULL);
   if( g_window == NULL )
   {
       fprintf( stderr, "Failed to open GLFW window.\n" );
@@ -534,6 +912,14 @@ int init_gl()
       return -1;
   }
   glfwMakeContextCurrent(g_window); // Initialize GLEW
+
+
+    int w, h;
+    int fbw, fbh;
+    glfwGetWindowSize(g_window, &w, &h);
+    glfwGetFramebufferSize(g_window, &fbw, &fbh);
+    printf("GLFW: Win: %dx%d  FB:%dx%d\n", w,h, fbw, fbh);
+
 
   return 0;
 }
@@ -559,7 +945,9 @@ int init_imgui()
 //  io.Fonts->AddFontFromFileTTF("data/Chivo-Regular.ttf", 32.0f);
   io.Fonts->AddFontDefault();
 
-  resizeCanvas();
+//#ifdef __EMSCRIPTEN__
+//  resizeCanvas();
+//#endif
 
   return 0;
 }
